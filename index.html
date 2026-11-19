@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Income Terminal — JEPI · JEPQ · PDI · SGOV</title>
+<!--
+  INCOME TERMINAL — Marcel's four monthly-pay funds.
+  Data: Finnhub API (free key from finnhub.io — paste it in the setup bar).
+  The key is the same one the market terminal uses (mmFinnhubKey), so if
+  you already saved it there, this terminal is live too. Keys, share
+  counts and watchlist live only in this browser's localStorage.
+
+  WHAT IT DOES
+  1. Positions ............ shares, avg cost, live price/value, gain/loss,
+     and monthly income per fund. Click a row to chart that fund.
+  2. Chart ................ hand-drawn candlesticks, 1D / 1M / 1Y, plus key
+     stats (market cap, P/E, EPS, beta, 52W range, div yield, earnings).
+     If Finnhub's free plan gates candles, it swaps in TradingView.
+  3. Rotation ............. next ex-date per fund, and the Wednesday
+     paycheck schedule: each payday buys the fund whose ex-date is next,
+     cash out 90% ~30 days later, leave 10% in. Skip weeks with no
+     hours — the rotation just shifts to the next Wednesday.
+
+  EX-DATE RULES (estimates from each fund's usual schedule)
+  - JEPI / JEPQ / SGOV go ex on the first business day of the month.
+    December pays twice: JEPI/JEPQ also go ex Dec 31, SGOV also Dec 18.
+    January has no ex-date for those three (the Dec 31 / Dec 18 ones
+    cover it); next is Feb 1.
+  - PDI goes ex around the 13th of every month and pays on the first
+    business day of the following month.
+  - Payouts use last month's per-share amount: JEPI $0.34683, JEPQ
+    $0.5392, PDI $0.2205, SGOV $0.32858. JEPI/JEPQ vary with option
+    premiums; PDI is steady; SGOV moves with T-bill rates.
+-->
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #000; --panel: #0b0b0b; --line: #262626; --amber: #ffb000;
+    --txt: #d7d7d7; --dim: #8a8a8a; --up: #2ebd85; --dn: #f6465d;
+    --mono: "Consolas", "SF Mono", "Menlo", monospace;
+  }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  header.term {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 2px solid var(--amber);
+    background: #050505;
+  }
+  header.term .logo { font-family: var(--mono); font-weight: 700;
+    font-size: 1.25rem; letter-spacing: .06em; color: #fff; }
+  header.term .logo span { color: var(--amber); }
+  header.term .stat { font-family: var(--mono); font-size: .85rem; color: var(--dim); }
+  header.term .stat b { color: var(--txt); font-weight: 600; }
+  .badge { font-family: var(--mono); font-size: .72rem; padding: 2px 8px;
+    border: 1px solid var(--amber); color: var(--amber); border-radius: 3px; }
+  .badge.live { border-color: var(--up); color: var(--up); }
+  header.term button, .setupbar button {
+    background: #161616; color: var(--txt); border: 1px solid var(--line);
+    padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: .85rem;
+  }
+  header.term button:hover, .setupbar button:hover { border-color: var(--amber); }
+  .spacer { flex: 1; }
+
+  .setupbar {
+    display: none; gap: 10px; flex-wrap: wrap; align-items: center;
+    padding: 10px 16px; background: #0d0d0d; border-bottom: 1px solid var(--line);
+    font-size: .88rem;
+  }
+  .setupbar.open { display: flex; }
+  .setupbar input {
+    background: #000; color: var(--txt); border: 1px solid var(--line);
+    padding: 7px 9px; border-radius: 4px; width: 300px; font-family: var(--mono);
+    font-size: .85rem;
+  }
+  .setupbar a { color: var(--amber); }
+  .setupbar .note { color: var(--dim); font-size: .8rem; width: 100%; }
+
+  main {
+    display: flex; flex-direction: column; gap: 10px; padding: 10px;
+    max-width: 1100px; margin: 0 auto;
+  }
+  section.panel { background: var(--panel); border: 1px solid var(--line); }
+  .panel h2 {
+    margin: 0; padding: 8px 12px; font-family: var(--mono); font-size: .8rem;
+    letter-spacing: .12em; color: var(--amber); border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel h2 .tools { display: flex; gap: 6px; }
+  .panel h2 button {
+    background: none; border: 1px solid var(--line); color: var(--dim);
+    font-family: var(--mono); font-size: .72rem; padding: 3px 9px; cursor: pointer;
+    border-radius: 3px; letter-spacing: .05em;
+  }
+  .panel h2 button.on { color: #000; background: var(--amber); border-color: var(--amber); font-weight: 700; }
+  .panel .body { padding: 10px 12px; }
+
+  table.wl { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .86rem; }
+  table.wl th { text-align: right; color: var(--dim); font-weight: 400;
+    padding: 4px 6px; border-bottom: 1px solid var(--line); font-size: .72rem; letter-spacing: .08em; }
+  table.wl th:first-child, table.wl td:first-child { text-align: left; }
+  table.wl td { text-align: right; padding: 7px 6px; border-bottom: 1px solid #161616; }
+  table.wl tr.row { cursor: pointer; }
+  table.wl tr.row:hover td { background: #111; }
+  table.wl tr.sel td { background: #171106; box-shadow: inset 2px 0 0 var(--amber); }
+  table.wl .sym { color: #fff; font-weight: 700; }
+  .up { color: var(--up); } .dn { color: var(--dn); }
+  .rot-tot { font-family: var(--mono); font-size: .85rem; padding: 8px 12px;
+    border-top: 1px solid var(--line); display: flex; justify-content: space-between;
+    flex-wrap: wrap; gap: 4px 14px; }
+  .rot-tot b { color: #fff; }
+
+  #chartWrap { position: relative; }
+  canvas#chart { width: 100%; height: 300px; display: block; background: #000; }
+  .chart-note { font-size: .78rem; color: var(--dim); padding: 6px 12px 10px; display: none; }
+  .bigsym { font-family: var(--mono); padding: 10px 12px 0; }
+  .bigsym .s { font-size: 1.3rem; color: #fff; font-weight: 700; }
+  .bigsym .p { font-size: 1.3rem; margin-left: 12px; }
+  .bigsym .n { color: var(--dim); font-size: .85rem; margin-left: 10px; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--line); border-top: 1px solid var(--line); }
+  .stat-cell { background: var(--panel); padding: 9px 12px; }
+  .stat-cell .k { font-size: .68rem; letter-spacing: .1em; color: var(--dim);
+    font-family: var(--mono); text-transform: uppercase; }
+  .stat-cell .v { font-family: var(--mono); font-size: 1.02rem; color: #fff; margin-top: 2px; }
+  .stat-cell .v small { color: var(--dim); font-size: .75rem; }
+
+  .rot-next { padding: 10px 12px 0; font-family: var(--mono); font-size: .85rem;
+    color: var(--dim); line-height: 1.6; }
+  .rot-next b { color: var(--amber); font-weight: 400; }
+  .rot-sched { padding: 6px 12px 4px; font-family: var(--mono); font-size: .88rem; line-height: 1.8; }
+  .rot-sched .w { color: #fff; }
+  .rot-sched .f { color: var(--amber); font-weight: 700; }
+  .rot-sched .x { color: var(--dim); }
+  .rot-note { padding: 4px 12px 10px; color: var(--dim); font-size: .78rem; line-height: 1.45; }
+  .empty { color: var(--dim); font-size: .88rem; padding: 8px 0; }
+  footer { padding: 4px 16px 18px; color: var(--dim); font-size: .78rem; max-width: 1100px; margin: 0 auto; }
+</style>
+</head>
+<body>
+
+<header class="term">
+  <div class="logo">INCOME<span>TERMINAL</span></div>
+  <span class="badge" id="modeBadge">DEMO DATA</span>
+  <div class="stat">LOCAL <b id="clock">--:--:--</b></div>
+  <div class="stat">MARKET <b id="mktStatus">—</b></div>
+  <div class="stat">UPDATED <b id="updatedAt">—</b></div>
+  <div class="spacer"></div>
+  <button id="refreshBtn" type="button">↻ Refresh</button>
+  <button id="setupBtn" type="button">⚙ API keys</button>
+</header>
+
+<div class="setupbar" id="setupBar">
+  <label>Finnhub key <input id="fhKey" type="text" placeholder="paste your free Finnhub API key"></label>
+  <button id="saveFh" type="button">Save</button>
+  <div class="note">Same key as the market terminal — if you already saved it there, this terminal is live too. Get a free key at <a href="https://finnhub.io/register" target="_blank" rel="noopener">finnhub.io/register</a> — free plan, no card. Keys are stored only in this browser. Without a key the terminal runs on clearly-labeled demo data.</div>
+</div>
+
+<main>
+  <section class="panel" id="posPanel">
+    <h2>POSITIONS — JEPI · JEPQ · PDI · SGOV <span class="tools"><button id="rotEditBtn" type="button">EDIT SHARES</button></span></h2>
+    <div style="overflow-x:auto">
+      <table class="wl">
+        <thead><tr><th>FUND</th><th>SHARES</th><th>AVG COST</th><th>PRICE</th><th>VALUE</th><th>GAIN</th><th>$/MO</th></tr></thead>
+        <tbody id="rotBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="rot-tot" id="rotTot"></div>
+  </section>
+
+  <section class="panel">
+    <h2>CHART — <span id="chartSym">PDI</span>
+      <span class="tools">
+        <button type="button" class="rng" data-r="1D">1D</button>
+        <button type="button" class="rng on" data-r="1M">1M</button>
+        <button type="button" class="rng" data-r="1Y">1Y</button>
+      </span>
+    </h2>
+    <div class="bigsym"><span class="s" id="bigSym">—</span><span class="p" id="bigPrice">—</span><span class="n" id="bigName"></span></div>
+    <div id="chartWrap"><canvas id="chart"></canvas></div>
+    <div class="chart-note" id="chartNote"></div>
+    <div class="stats" id="statsGrid"></div>
+  </section>
+
+  <section class="panel" id="schedPanel">
+    <h2>ROTATION — WEDNESDAY PAYCHECKS</h2>
+    <div class="rot-next" id="rotNext"></div>
+    <div class="rot-sched" id="rotSched"></div>
+    <div class="rot-note">Payouts use last month's per-share amount — JEPI/JEPQ vary, PDI is steady at $0.2205, SGOV moves with rates. Ex-dates are estimates from each fund's usual schedule. Each Wednesday paycheck buys the fund whose ex-date is next; ~30 days later sell 90% and leave 10% in. Skip weeks with no hours — the rotation just shifts to the next Wednesday.</div>
+  </section>
+</main>
+
+<footer>Data: Finnhub (quotes refresh every 20s; free plan is delayed on some exchanges). Not investment advice — a learning project.</footer>
+<script>
+// ---------- JavaScript: state, API, demo data ----------
+var FH = "https://finnhub.io/api/v1";
+var state = {
+  symbol: "PDI", range: "1M",
+  quotes: {},   // SYM -> {c,d,dp,h,l,o,pc}
+  names: {}     // SYM -> company name
+};
+function fhKey() { return localStorage.getItem("mmFinnhubKey") || ""; }
+function isDemo() { return !fhKey(); }
+
+function fmtPrice(x) { return (x == null || isNaN(x)) ? "—" : Number(x).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function fmtPct(x) { return (x == null || isNaN(x)) ? "—" : (x >= 0 ? "+" : "") + Number(x).toFixed(2) + "%"; }
+function fmtCap(millions) { // Finnhub profile2 market cap is in $ millions
+  if (millions == null || isNaN(millions)) return "—";
+  if (millions >= 1e6) return "$" + (millions / 1e6).toFixed(2) + "T";
+  if (millions >= 1e3) return "$" + (millions / 1e3).toFixed(1) + "B";
+  return "$" + millions.toFixed(0) + "M";
+}
+function dstr(d) { return d.toISOString().slice(0, 10); }
+function daysFromNow(n) { var d = new Date(); d.setDate(d.getDate() + n); return d; }
+
+async function api(path, params) {
+  var qs = Object.keys(params || {}).map(function (k) {
+    return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]);
+  }).join("&");
+  var res = await fetch(FH + path + "?" + qs + (qs ? "&" : "") + "token=" + encodeURIComponent(fhKey()));
+  if (!res.ok) throw new Error("Finnhub " + res.status + " on " + path);
+  return res.json();
+}
+
+// ---------- Demo data (only until a Finnhub key is saved) ----------
+var DEMO_BASE = { JEPI: 57.00, JEPQ: 54.69, PDI: 13.86, SGOV: 100.61 };
+var DEMO_NAMES = { JEPI: "JPMorgan Equity Premium Income", JEPQ: "JPMorgan Nasdaq Equity Premium Income",
+  PDI: "PIMCO Dynamic Income Fund", SGOV: "iShares 0-3 Month Treasury Bond" };
+function demoQuote(sym) {
+  var base = DEMO_BASE[sym] || 100;
+  var seed = 0; for (var i = 0; i < sym.length; i++) seed += sym.charCodeAt(i);
+  var dp = (((seed * 37) % 500) - 200) / 100;            // -2.00% .. +2.99%
+  var c = base * (1 + dp / 100);
+  return { c: c, d: c - base, dp: dp, h: c * 1.01, l: c * 0.99, o: base, pc: base };
+}
+function demoCandles(sym, points) {
+  var price = (DEMO_BASE[sym] || 100) * 0.9, out = { o: [], h: [], l: [], c: [], v: [], t: [] };
+  var seed = 0; for (var i = 0; i < sym.length; i++) seed += sym.charCodeAt(i) * (i + 3);
+  function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
+  var now = Math.floor(Date.now() / 1000);
+  for (var i = 0; i < points; i++) {
+    var o = price, drift = (rnd() - 0.47) * price * 0.03, c = o + drift;
+    out.o.push(o); out.c.push(c);
+    out.h.push(Math.max(o, c) * (1 + rnd() * 0.008));
+    out.l.push(Math.min(o, c) * (1 - rnd() * 0.008));
+    out.v.push(Math.floor(5e5 + rnd() * 4e7));
+    out.t.push(now - (points - i) * 86400);
+    price = c;
+  }
+  out.s = "ok";
+  return out;
+}
+
+// ---------- Positions (from Marcel's screenshot, Nov 19, 2026) ----------
+// Shares are editable with the EDIT SHARES button; stored in this browser only.
+var ROT_SYMS = ["PDI", "JEPQ", "JEPI", "SGOV"];
+var ROT_DEFAULT = { PDI: { sh: 113.08713, cost: 15.87 }, JEPQ: { sh: 38.50098, cost: 59.35 },
+  JEPI: { sh: 8.92229, cost: 56.90 }, SGOV: { sh: 5.02016, cost: 100.51 } };
+// Last monthly payout per share (Nov 2026).
+var LAST_DIST = { JEPI: 0.34683, JEPQ: 0.5392, PDI: 0.2205, SGOV: 0.32858 };
+function loadRotPos() {
+  try {
+    var v = JSON.parse(localStorage.getItem("mmIncomePos"));
+    if (v) {
+      var ok = true;
+      ROT_SYMS.forEach(function (s) { if (!v[s] || isNaN(+v[s].sh) || isNaN(+v[s].cost)) ok = false; });
+      if (ok) return v;
+    }
+  } catch (e) {}
+  return JSON.parse(JSON.stringify(ROT_DEFAULT));
+}
+function saveRotPos(p) { try { localStorage.setItem("mmIncomePos", JSON.stringify(p)); } catch (e) {} }
+
+// ---------- Quotes + positions table ----------
+async function refreshQuotes() {
+  if (isDemo()) {
+    ROT_SYMS.forEach(function (s) { state.quotes[s] = demoQuote(s); state.names[s] = DEMO_NAMES[s] || s; });
+  } else {
+    await Promise.all(ROT_SYMS.map(async function (s) {
+      try {
+        var q = await api("/quote", { symbol: s });
+        if (q && q.c) state.quotes[s] = { c: q.c, d: q.d, dp: q.dp, h: q.h, l: q.l, o: q.o, pc: q.pc };
+      } catch (e) { /* keep last good quote */ }
+    }));
+  }
+  renderPositions();
+  renderBigPrice();
+  document.getElementById("updatedAt").textContent =
+    new Date().toLocaleTimeString("en-US", { hour12: false });
+}
+function renderPositions() {
+  var pos = loadRotPos(), tb = document.getElementById("rotBody");
+  if (!tb) return;
+  var totV = 0, totG = 0, totM = 0, priced = 0, html = "";
+  ROT_SYMS.forEach(function (s) {
+    var p = pos[s], q = state.quotes[s] || {};
+    var price = (q.c != null && !isNaN(q.c)) ? q.c : null;
+    var val = price != null ? p.sh * price : null;
+    var gain = val != null ? val - p.sh * p.cost : null;
+    var inc = p.sh * LAST_DIST[s];
+    totM += inc;
+    if (val != null) { totV += val; totG += gain; priced++; }
+    var gTxt = gain == null ? "—" : (gain >= 0 ? "+$" : "−$") + fmtPrice(Math.abs(gain));
+    html += "<tr class=\"row" + (s === state.symbol ? " sel" : "") + "\">" +
+      "<td><span class=\"sym\" title=\"Last payout $" + LAST_DIST[s] + "/sh\">" + s + "</span></td>" +
+      "<td>" + p.sh.toFixed(2) + "</td>" +
+      "<td>$" + p.cost.toFixed(2) + "</td>" +
+      "<td>" + (price != null ? "$" + fmtPrice(price) : "—") + "</td>" +
+      "<td>" + (val != null ? "$" + fmtPrice(val) : "—") + "</td>" +
+      "<td class=\"" + (gain == null ? "" : (gain >= 0 ? "up" : "dn")) + "\">" + gTxt + "</td>" +
+      "<td>$" + inc.toFixed(2) + "</td></tr>";
+  });
+  tb.innerHTML = html;
+  tb.querySelectorAll("tr.row").forEach(function (tr, i) {
+    tr.onclick = function () { selectSymbol(ROT_SYMS[i]); };
+  });
+  document.getElementById("rotTot").innerHTML =
+    "<span>TOTAL <b>" + (priced ? "$" + fmtPrice(totV) : "—") + "</b></span>" +
+    "<span>GAIN <b class=\"" + (totG >= 0 ? "up" : "dn") + "\">" + (totG >= 0 ? "+$" : "−$") +
+    fmtPrice(Math.abs(totG)) + "</b></span>" +
+    "<span>INCOME <b>$" + totM.toFixed(2) + "/mo ($" + fmtPrice(totM * 12) + "/yr)</b></span>";
+}
+function renderBigPrice() {
+  var q = state.quotes[state.symbol] || {};
+  document.getElementById("bigSym").textContent = state.symbol;
+  var bp = document.getElementById("bigPrice");
+  bp.textContent = fmtPrice(q.c);
+  bp.className = "p " + ((q.dp || 0) >= 0 ? "up" : "dn");
+  document.getElementById("bigName").textContent =
+    (state.names[state.symbol] || "") + (q.dp != null ? "  ·  " + fmtPct(q.dp) + " today" : "");
+}
+document.getElementById("rotEditBtn").onclick = function () {
+  var pos = loadRotPos(), changed = false;
+  ROT_SYMS.forEach(function (s) {
+    var v = prompt(s + " shares (now " + pos[s].sh + ")", String(pos[s].sh));
+    if (v === null) return;
+    var n = parseFloat(v);
+    if (!isNaN(n) && n >= 0) { pos[s].sh = n; changed = true; }
+  });
+  if (changed) { saveRotPos(pos); renderPositions(); }
+};
+
+// ---------- Candlestick chart ----------
+var RANGES = {
+  "1D": { res: "5", span: 86400 },
+  "1M": { res: "D", span: 30 * 86400 },
+  "1Y": { res: "W", span: 365 * 86400 }
+};
+async function loadCandles() {
+  var note = document.getElementById("chartNote");
+  note.style.display = "none";
+  var wrap = document.getElementById("chartWrap");
+  wrap.innerHTML = '<canvas id="chart"></canvas>';
+  document.getElementById("chartSym").textContent = state.symbol;
+  if (isDemo()) {
+    var pts = state.range === "1D" ? 78 : state.range === "1M" ? 30 : 52;
+    drawCandles(demoCandles(state.symbol, pts));
+    return;
+  }
+  var cfg = RANGES[state.range], to = Math.floor(Date.now() / 1000), from = to - cfg.span;
+  try {
+    var data = await api("/stock/candle", { symbol: state.symbol, resolution: cfg.res, from: from, to: to });
+    if (!data || data.s !== "ok" || !data.c || !data.c.length) throw new Error("no candle data");
+    drawCandles(data);
+  } catch (e) {
+    tvFallback(); // free plan may gate candle history — swap in TradingView
+  }
+}
+function drawCandles(data) {
+  var canvas = document.getElementById("chart");
+  if (!canvas) return;
+  var dpr = window.devicePixelRatio || 1;
+  var W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  var ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+  var n = data.c.length, volH = 46, priceH = H - volH - 8;
+  var min = Math.min.apply(null, data.l), max = Math.max.apply(null, data.h);
+  var pad = (max - min) * 0.06 || 1; min -= pad; max += pad;
+  var vmax = Math.max.apply(null, data.v) || 1;
+  var y = function (p) { return 6 + (max - p) / (max - min) * priceH; };
+  ctx.strokeStyle = "#1c1c1c"; ctx.fillStyle = "#8a8a8a";
+  ctx.font = "10px Consolas, monospace"; ctx.lineWidth = 1;
+  for (var g = 0; g <= 4; g++) {
+    var p = min + (max - min) * g / 4, yy = y(p);
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W - 52, yy); ctx.stroke();
+    ctx.fillText(fmtPrice(p), W - 48, yy + 3);
+  }
+  var step = (W - 56) / n, bw = Math.max(1, Math.floor(step * 0.65));
+  for (var i = 0; i < n; i++) {
+    var x = 2 + i * step + step / 2, up = data.c[i] >= data.o[i];
+    var col = up ? "#2ebd85" : "#f6465d";
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.moveTo(x, y(data.h[i])); ctx.lineTo(x, y(data.l[i])); ctx.stroke();
+    var yO = y(data.o[i]), yC = y(data.c[i]);
+    ctx.fillRect(x - bw / 2, Math.min(yO, yC), bw, Math.max(1.5, Math.abs(yC - yO)));
+    var vh = data.v[i] / vmax * volH;
+    ctx.globalAlpha = 0.55;
+    ctx.fillRect(x - bw / 2, H - vh, bw, vh);
+    ctx.globalAlpha = 1;
+  }
+}
+function tvFallback() {
+  var wrap = document.getElementById("chartWrap");
+  wrap.innerHTML = "";
+  var holder = document.createElement("div");
+  holder.style.height = "300px";
+  wrap.appendChild(holder);
+  var cont = document.createElement("div");
+  cont.className = "tradingview-widget-container";
+  cont.style.height = "100%";
+  var inner = document.createElement("div");
+  inner.className = "tradingview-widget-container__widget";
+  inner.style.height = "100%";
+  cont.appendChild(inner);
+  var s = document.createElement("script");
+  s.type = "text/javascript"; s.async = true;
+  s.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+  s.innerHTML = JSON.stringify({
+    autosize: true, symbol: state.symbol, interval: state.range === "1D" ? "5" : state.range === "1M" ? "D" : "W",
+    timezone: "America/Los_Angeles", theme: "dark", style: "1", locale: "en",
+    allow_symbol_change: false, support_host: "https://www.tradingview.com"
+  });
+  cont.appendChild(s);
+  holder.appendChild(cont);
+  var note = document.getElementById("chartNote");
+  note.textContent = "Finnhub's free plan doesn't include candle history for this account, so this chart is served by TradingView instead — same symbol, same 1D/1M/1Y views (buttons above still apply).";
+  note.style.display = "block";
+}
+
+// ---------- Key stats + earnings ----------
+function statCell(k, v) { return '<div class="stat-cell"><div class="k">' + k + '</div><div class="v">' + v + "</div></div>"; }
+async function loadStats() {
+  var grid = document.getElementById("statsGrid"), sym = state.symbol;
+  if (isDemo()) {
+    var seed = 0; for (var i = 0; i < sym.length; i++) seed += sym.charCodeAt(i);
+    grid.innerHTML =
+      statCell("Market Cap", fmtCap(2.8e6 + seed * 12345)) +
+      statCell("P/E (TTM)", (18 + seed % 22) + "." + (seed % 9)) +
+      statCell("EPS (TTM)", "$" + ((seed % 900) / 100 + 1).toFixed(2)) +
+      statCell("Beta", (0.7 + (seed % 90) / 100).toFixed(2)) +
+      statCell("52W High", fmtPrice((DEMO_BASE[sym] || 100) * 1.12)) +
+      statCell("52W Low", fmtPrice((DEMO_BASE[sym] || 100) * 0.78)) +
+      statCell("Div Yield", (seed % 3 === 0 ? "—" : "0." + (seed % 9) + "%")) +
+      statCell("Next Earnings", dstr(daysFromNow(6 + seed % 40)) + ' <small>demo</small>');
+    return;
+  }
+  grid.innerHTML = statCell("Loading", "…");
+  var prof = {}, metric = {}, earn = null;
+  try { prof = await api("/stock/profile2", { symbol: sym }); } catch (e) {}
+  try { var m = await api("/stock/metric", { symbol: sym, metric: "all" }); metric = (m && m.metric) || {}; } catch (e) {}
+  try {
+    var cal = await api("/calendar/earnings", { from: dstr(new Date()), to: dstr(daysFromNow(120)), symbol: sym });
+    var rows = ((cal && cal.earningsCalendar) || []).filter(function (r) { return r.symbol === sym; });
+    rows.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+    earn = rows[0] || null;
+  } catch (e) {}
+  if (prof && prof.name) { state.names[sym] = prof.name; renderPositions(); renderBigPrice(); }
+  var pe = metric.peTTM != null ? metric.peTTM : metric.peBasicExclExtraTTM;
+  grid.innerHTML =
+    statCell("Market Cap", fmtCap(prof.marketCapitalization)) +
+    statCell("P/E (TTM)", pe != null ? Number(pe).toFixed(1) : "—") +
+    statCell("EPS (TTM)", metric.epsTTM != null ? "$" + Number(metric.epsTTM).toFixed(2) : "—") +
+    statCell("Beta", metric.beta != null ? Number(metric.beta).toFixed(2) : "—") +
+    statCell("52W High", fmtPrice(metric["52WeekHigh"])) +
+    statCell("52W Low", fmtPrice(metric["52WeekLow"])) +
+    statCell("Div Yield", metric.dividendYieldIndicatedAnnual != null ? Number(metric.dividendYieldIndicatedAnnual).toFixed(2) + "%" : "—") +
+    statCell("Next Earnings", earn ? earn.date + (earn.epsEstimate != null ? ' <small>est $' + Number(earn.epsEstimate).toFixed(2) + "</small>" : "") : "—");
+}
+
+// ---------- Rotation schedule ----------
+// Pay date is roughly this many business days after the ex-date (PDI pays
+// on the first business day of the following month instead).
+var PAY_BIZDAYS = { JEPI: 2, JEPQ: 2, SGOV: 3 };
+function addDays(d, n) { var x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function addBizDays(d, n) {
+  var x = new Date(d);
+  while (n > 0) { x.setDate(x.getDate() + 1); if (x.getDay() !== 0 && x.getDay() !== 6) n--; }
+  return x;
+}
+function fmtD(d) { return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); }
+function fmtRange(a, b) {
+  if (a.getMonth() === b.getMonth()) return fmtD(a) + "–" + b.getDate();
+  return fmtD(a) + "–" + fmtD(b);
+}
+function rollFwdBiz(d) { var x = new Date(d); while (x.getDay() === 0 || x.getDay() === 6) x.setDate(x.getDate() + 1); return x; }
+function firstBizDay(y, m) { return rollFwdBiz(new Date(y, m, 1)); }
+// PDI goes ex around the 13th (previous Friday when the 13th is a weekend).
+function pdiEx(y, m) {
+  var x = new Date(y, m, 13);
+  while (x.getDay() === 0 || x.getDay() === 6) x.setDate(x.getDate() - 1);
+  return x;
+}
+// Ex-date events for the next few months, from each fund's usual schedule.
+// JEPI/JEPQ/SGOV go ex on the first business day of the month — except
+// January, which is covered by a second December distribution (Dec 31 for
+// JEPI/JEPQ, Dec 18 for SGOV). PDI goes ex mid-month, every month.
+function rotEvents(from) {
+  var evs = [], base = new Date(from.getFullYear(), from.getMonth(), 1);
+  for (var i = 0; i < 5; i++) {
+    var yy = base.getFullYear() + Math.floor((base.getMonth() + i) / 12);
+    var mm = (base.getMonth() + i) % 12;
+    if (mm !== 0) {
+      var d1 = firstBizDay(yy, mm);
+      ["JEPI", "JEPQ", "SGOV"].forEach(function (f) { evs.push({ fund: f, date: d1 }); });
+    }
+    if (mm === 11) { // December pays twice
+      ["JEPQ", "JEPI"].forEach(function (f) { evs.push({ fund: f, date: new Date(yy, 11, 31) }); });
+      evs.push({ fund: "SGOV", date: new Date(yy, 11, 18) });
+    }
+    evs.push({ fund: "PDI", date: pdiEx(yy, mm) });
+  }
+  evs.sort(function (a, b) { return a.date - b.date; });
+  return evs.filter(function (e) { return e.date >= from; });
+}
+function nextWednesdays(n) {
+  var out = [], d = new Date(); d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + ((3 - d.getDay() + 7) % 7));
+  for (var i = 0; i < n; i++) { out.push(new Date(d)); d.setDate(d.getDate() + 7); }
+  return out;
+}
+// Each Wednesday takes the next ex-date event after it (events are consumed
+// in order, so a week with no paycheck just shifts the rotation).
+function rotSchedule() {
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var evs = rotEvents(today), used = 0, rows = [];
+  nextWednesdays(6).forEach(function (w) {
+    while (used < evs.length && evs[used].date < w) used++;
+    var ev = evs[used] || null;
+    if (ev) used++;
+    rows.push({ wed: w, ev: ev });
+  });
+  return rows;
+}
+function payDateFor(ev) {
+  if (ev.fund === "PDI") {
+    var y = ev.date.getFullYear(), m = ev.date.getMonth() + 1;
+    return firstBizDay(y + Math.floor(m / 12), m % 12);
+  }
+  return addBizDays(ev.date, PAY_BIZDAYS[ev.fund] || 2);
+}
+function renderSchedule() {
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var evs = rotEvents(today);
+  document.getElementById("rotNext").innerHTML = "NEXT EX — " + ROT_SYMS.map(function (s) {
+    for (var i = 0; i < evs.length; i++) if (evs[i].fund === s) return "<b>" + s + " " + fmtD(evs[i].date) + "</b>";
+    return "<b>" + s + " —</b>";
+  }).join(" · ");
+  document.getElementById("rotSched").innerHTML = rotSchedule().map(function (r) {
+    var w = "Wed " + fmtD(r.wed);
+    if (!r.ev) return "<div><span class=\"w\">" + w + "</span> → <span class=\"x\">no ex-date scheduled</span></div>";
+    return "<div><span class=\"w\">" + w + "</span> → <span class=\"f\">" + r.ev.fund + "</span>" +
+      " <span class=\"x\">ex " + fmtD(r.ev.date) + " · pay ~" + fmtD(payDateFor(r.ev)) +
+      " · cash out " + fmtRange(addDays(r.wed, 28), addDays(r.wed, 31)) + "</span></div>";
+  }).join("");
+}
+
+// ---------- Selection, setup, clock ----------
+function selectSymbol(sym) {
+  state.symbol = sym;
+  renderPositions(); renderBigPrice();
+  loadCandles(); loadStats();
+}
+document.querySelectorAll(".rng").forEach(function (b) {
+  b.onclick = function () {
+    document.querySelectorAll(".rng").forEach(function (x) { x.classList.remove("on"); });
+    b.classList.add("on");
+    state.range = b.getAttribute("data-r");
+    loadCandles();
+  };
+});
+document.getElementById("refreshBtn").onclick = function () {
+  refreshQuotes(); loadCandles(); loadStats();
+};
+var setupBar = document.getElementById("setupBar");
+document.getElementById("setupBtn").onclick = function () { setupBar.classList.toggle("open"); };
+document.getElementById("fhKey").value = fhKey();
+document.getElementById("saveFh").onclick = function () {
+  localStorage.setItem("mmFinnhubKey", document.getElementById("fhKey").value.trim());
+  location.reload();
+};
+function tickClock() {
+  document.getElementById("clock").textContent =
+    new Date().toLocaleTimeString("en-US", { hour12: false });
+  try {
+    var et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    var mins = et.getHours() * 60 + et.getMinutes(), day = et.getDay();
+    var open = day >= 1 && day <= 5 && mins >= 570 && mins < 960;
+    document.getElementById("mktStatus").textContent = open ? "OPEN" : "CLOSED";
+  } catch (e) {}
+}
+function init() {
+  var badge = document.getElementById("modeBadge");
+  if (isDemo()) { setupBar.classList.add("open"); }
+  else { badge.textContent = "LIVE — FINNHUB"; badge.classList.add("live"); }
+  tickClock(); setInterval(tickClock, 1000);
+  renderSchedule();
+  refreshQuotes();
+  selectSymbol(state.symbol);
+  setInterval(refreshQuotes, 20000);
+}
+init();
+</script>
+</body>
+</html>
